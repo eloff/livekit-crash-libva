@@ -1,26 +1,13 @@
-# LiveKit Rust SDK: `Room::close()` memory corruption with video tracks
+# LiveKit Rust SDK: double-free crash with video tracks
 
-Minimal reproduction of a memory corruption bug in `livekit::Room::close()`.
+Minimal reproduction of a memory corruption bug in the LiveKit Rust SDK.
 
 ## Problem
 
 When a video track is published to a LiveKit room via `publish_track`, and
-then the room is closed with `room.close()`, subsequent video track usage in
-the same process crashes with a **double-free** (`SIGABRT`). The first
-session closes without error, but the second session crashes when trying to
-publish a new video track.
-
-This manifests in our CI as:
-- Sporadic test timeouts (undefined behavior from memory corruption appearing
-  as deadlocks)
-- `double free or corruption (out)` crashes under certain scheduling
-
-The underlying issue appears to be that `Room::close()` doesn't properly
-release video track resources (likely in the libwebrtc C++ layer). After
-`close()` returns, some internal state remains corrupted, which causes a
-double-free on the next allocation in the same process.
-
-## Reproduction
+then the room is closed, internal libwebrtc resources are not properly
+released. Publishing a video track in a subsequent room session within the
+same process then crashes with a **double-free** (`SIGABRT`).
 
 The bug reproduces **every time** — iteration 0 completes normally, but
 iteration 1 crashes:
@@ -63,20 +50,4 @@ RUST_LOG=info cargo run
 | Code | Meaning |
 |------|---------|
 | `0` | All iterations passed (no bug) |
-| `1` | `room.close()` timed out (hang variant of the bug) |
-| `134` | SIGABRT — double-free crash (the primary reproduction) |
-
-## Workaround
-
-We work around the hang variant in production with a timeout:
-```rust
-match tokio::time::timeout(Duration::from_secs(5), room.close()).await {
-    Ok(Ok(())) => {}
-    Ok(Err(e)) => error!("failed to close room: {e}"),
-    Err(_) => warn!("room close timed out; abandoning teardown"),
-}
-```
-
-However, the double-free cannot be worked around — it corrupts the process.
-The only mitigation is to ensure that video tracks are never published in a
-process that will also create subsequent LiveKit room sessions.
+| `134` | SIGABRT — double-free crash (expected) |

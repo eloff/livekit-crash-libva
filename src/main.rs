@@ -1,11 +1,9 @@
-//! Minimal reproduction of Room::close() causing memory corruption.
+//! Reproduction of a double-free crash in the LiveKit Rust SDK.
 //!
-//! The LiveKit Rust SDK has a bug where Room::close() does not properly clean
-//! up video track resources. When a second room session is created in the same
-//! process after the first is closed, it crashes with a double-free.
-//!
-//! This likely also manifests as the sporadic "hang" we see in CI, since
-//! undefined behavior from memory corruption can appear as deadlocks.
+//! When a video track is published via `publish_track` and the room is later
+//! closed, internal libwebrtc resources are not properly released. Publishing
+//! a video track in a subsequent room session within the same process then
+//! crashes with `double free or corruption (out)` (SIGABRT).
 //!
 //! ## Prerequisites
 //!
@@ -25,9 +23,6 @@
 //!
 //! The program crashes with `double free or corruption (out)` / SIGABRT on the
 //! second iteration, every time.
-//!
-//! Exit status: `0` if all iterations pass; `134` (SIGABRT) on crash; `1` if
-//! `room.close()` timed out.
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -40,13 +35,12 @@ use livekit::options::{TrackPublishOptions, VideoCodec};
 use livekit::prelude::*;
 use livekit::{Room, RoomEvent, RoomOptions, StreamByteOptions, StreamWriter as _};
 use livekit_api::access_token::{AccessToken, VideoGrants};
-use tracing::{error, info, warn};
+use tracing::info;
 
 const LIVEKIT_URL: &str = "http://localhost:7880";
 const API_KEY: &str = "devkey";
 const API_SECRET: &str = "secret";
 
-const CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 const NUM_ITERATIONS: u32 = 5;
 
 fn generate_token(room_name: &str, identity: &str) -> String {
@@ -63,8 +57,7 @@ fn generate_token(room_name: &str, identity: &str) -> String {
 }
 
 /// Run a single session: connect, publish video + data tracks, exchange data, close.
-/// Returns true if room.close() timed out (hang reproduced).
-async fn run_session(iteration: u32) -> bool {
+async fn run_session(iteration: u32) {
     let room_name = format!("room-close-repro-{iteration}");
 
     // Connect A (gateway/device).
@@ -107,7 +100,7 @@ async fn run_session(iteration: u32) -> bool {
 
     let mut reader_a = wait_for_byte_stream(&mut events_a).await;
 
-    // A publishes data tracks.
+    // A publishes a data track.
     let dt1 = room_a
         .local_participant()
         .publish_data_track("data-ch-1".to_string())
@@ -150,7 +143,7 @@ async fn run_session(iteration: u32) -> bool {
 
     wait_for_track_subscribed(&mut events_b).await;
 
-    // Exchange data.
+    // Exchange data on byte streams and data track.
     writer_a.write(b"hello").await.expect("write A failed");
     writer_b.write(b"world").await.expect("write B failed");
     if let Some(Ok(_)) = reader_b.next().await {}
@@ -166,17 +159,7 @@ async fn run_session(iteration: u32) -> bool {
     room_b.close().await.ok();
 
     // A closes with video + data tracks still published.
-    match tokio::time::timeout(CLOSE_TIMEOUT, room_a.close()).await {
-        Ok(Ok(())) => false,
-        Ok(Err(e)) => {
-            warn!("iteration {iteration}: room close error: {e}");
-            false
-        }
-        Err(_) => {
-            error!("iteration {iteration}: BUG — room.close() TIMED OUT");
-            true
-        }
-    }
+    room_a.close().await.expect("A room close failed");
 }
 
 #[tokio::main]
@@ -189,17 +172,14 @@ async fn main() -> ExitCode {
         .init();
 
     info!("running {NUM_ITERATIONS} iterations within a single process");
-    info!("the bug manifests as a double-free crash (SIGABRT) on iteration 1");
+    info!("expect a double-free crash (SIGABRT) on iteration 1");
 
     for i in 0..NUM_ITERATIONS {
         info!("--- iteration {i}/{NUM_ITERATIONS} ---");
-        if run_session(i).await {
-            error!("hang reproduced on iteration {i}");
-            return ExitCode::from(1);
-        }
+        run_session(i).await;
     }
 
-    info!("all {NUM_ITERATIONS} iterations completed without hang or crash");
+    info!("all {NUM_ITERATIONS} iterations completed without crash");
     ExitCode::SUCCESS
 }
 
