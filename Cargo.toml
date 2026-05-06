@@ -1,0 +1,14 @@
+[package]
+name = "livekit_room_close"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+livekit = { version = "0.7.37", features = ["rustls-tls-native-roots"] }
+libwebrtc = "0.3.24"
+livekit-api = { version = "0.4", default-features = false, features = ["access-token"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
